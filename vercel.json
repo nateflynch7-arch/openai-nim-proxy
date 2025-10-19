@@ -1,0 +1,30 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api/index.py"
+    }
+  ]
+}
+```
+
+**2. Create `requirements.txt` in the same folder:**
+```
+flask
+requests
+```
+
+**3. File structure should be:**
+```
+your-project/
+├── api/
+│   └── index.py  (the Python code I just gave you)
+├── vercel.json
+└── requirements.txt
