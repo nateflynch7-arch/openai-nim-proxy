@@ -9,7 +9,7 @@ app = Flask(__name__)
 NVIDIA_API_KEY = "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"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
-# Model mapping (OpenAI model names to NVIDIA NIM models)
+# Model mapping
 MODEL_MAPPING = {
     "gpt-3.5-turbo": "deepseek-ai/deepseek-v3.1-terminus",
     "gpt-4": "deepseek-ai/deepseek-v3.1-terminus",
@@ -18,7 +18,6 @@ MODEL_MAPPING = {
 }
 
 def convert_to_nvidia_format(openai_request):
-    """Convert OpenAI format to NVIDIA NIM format"""
     model = openai_request.get("model", "gpt-3.5-turbo")
     nvidia_model = MODEL_MAPPING.get(model, "deepseek-ai/deepseek-v3.1-terminus")
     
@@ -34,7 +33,6 @@ def convert_to_nvidia_format(openai_request):
     return nvidia_request
 
 def convert_to_openai_format(nvidia_response, model):
-    """Convert NVIDIA NIM response to OpenAI format"""
     openai_response = {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion",
@@ -60,7 +58,6 @@ def convert_to_openai_format(nvidia_response, model):
     return openai_response
 
 def convert_stream_chunk(nvidia_chunk, model):
-    """Convert NVIDIA NIM streaming chunk to OpenAI format"""
     openai_chunk = {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion.chunk",
@@ -77,8 +74,27 @@ def convert_stream_chunk(nvidia_chunk, model):
     
     return openai_chunk
 
-@app.route('/v1/chat/completions', methods=['POST'])
+@app.route('/')
+def index():
+    return jsonify({
+        "status": "ok",
+        "message": "NVIDIA NIM Proxy is running",
+        "endpoints": {
+            "chat": "/v1/chat/completions",
+            "models": "/v1/models",
+            "health": "/health"
+        }
+    })
+
+@app.route('/v1/chat/completions', methods=['POST', 'OPTIONS'])
 def chat_completions():
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', '*')
+        response.headers.add('Access-Control-Allow-Methods', '*')
+        return response
+        
     try:
         openai_request = request.json
         nvidia_request = convert_to_nvidia_format(openai_request)
@@ -89,7 +105,6 @@ def chat_completions():
         }
         
         if nvidia_request.get("stream", False):
-            # Handle streaming
             def generate():
                 response = requests.post(
                     f"{NVIDIA_BASE_URL}/chat/completions",
@@ -118,7 +133,6 @@ def chat_completions():
             
             return Response(generate(), mimetype='text/event-stream')
         else:
-            # Handle non-streaming
             response = requests.post(
                 f"{NVIDIA_BASE_URL}/chat/completions",
                 headers=headers,
@@ -140,7 +154,6 @@ def chat_completions():
 
 @app.route('/v1/models', methods=['GET'])
 def list_models():
-    """List available models in OpenAI format"""
     models = {
         "object": "list",
         "data": [
@@ -168,15 +181,16 @@ def list_models():
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
     return jsonify({"status": "ok"})
 
-if __name__ == '__main__':
-    print("Starting OpenAI-compatible NVIDIA NIM Proxy...")
-    print("Server will run on http://0.0.0.0:5000")
-    print("Set your NVIDIA API key in the NVIDIA_API_KEY variable")
-    print("\nEndpoints:")
-    print("  - POST /v1/chat/completions")
-    print("  - GET  /v1/models")
-    print("  - GET  /health")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+# For Vercel serverless
+def handler(request):
+    with app.request_context(request.environ):
+        try:
+            rv = app.preprocess_request()
+            if rv is None:
+                rv = app.dispatch_request()
+        except Exception as e:
+            rv = app.handle_user_exception(e)
+        response = app.make_response(rv)
+        return app.process_response(response)
