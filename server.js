@@ -1,166 +1,182 @@
 from flask import Flask, request, jsonify, Response
 import requests
 import json
-import os
-from datetime import datetime
+import time
 
 app = Flask(__name__)
 
-# Configuration
-NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', 'your-nvidia-api-key-here')
-NVIDIA_BASE_URL = os.environ.get('NVIDIA_BASE_URL', 'https://integrate.api.nvidia.com/v1')
+# NVIDIA NIM Configuration
+NVIDIA_API_KEY = "your_nvidia_api_key_here"  # Replace with your NVIDIA API key
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
-# Model mapping (OpenAI model names to NVIDIA NIM model names)
+# Model mapping (OpenAI model names to NVIDIA NIM models)
 MODEL_MAPPING = {
-    'gpt-3.5-turbo': 'meta/llama-3.1-8b-instruct',
-    'gpt-4': 'meta/llama-3.1-70b-instruct',
-    'gpt-4-turbo': 'meta/llama-3.1-70b-instruct',
-    'gpt-4o': 'meta/llama-3.1-405b-instruct',
+    "gpt-3.5-turbo": "deepseek-ai/deepseek-v3.1-terminus",
+    "gpt-4": "deepseek-ai/deepseek-v3.1-terminus",
+    "gpt-4-turbo": "deepseek-ai/deepseek-v3.1-terminus",
+    "deepseek-v3.1": "deepseek-ai/deepseek-v3.1-terminus"
 }
 
 def convert_to_nvidia_format(openai_request):
     """Convert OpenAI format to NVIDIA NIM format"""
+    model = openai_request.get("model", "gpt-3.5-turbo")
+    nvidia_model = MODEL_MAPPING.get(model, "deepseek-ai/deepseek-v3.1-terminus")
+    
     nvidia_request = {
-        'model': MODEL_MAPPING.get(openai_request.get('model', 'gpt-3.5-turbo'), 
-                                   'meta/llama-3.1-8b-instruct'),
-        'messages': openai_request.get('messages', []),
-        'temperature': openai_request.get('temperature', 1.0),
-        'top_p': openai_request.get('top_p', 1.0),
-        'max_tokens': openai_request.get('max_tokens', 1024),
-        'stream': openai_request.get('stream', False)
+        "model": nvidia_model,
+        "messages": openai_request.get("messages", []),
+        "temperature": openai_request.get("temperature", 0.7),
+        "top_p": openai_request.get("top_p", 1.0),
+        "max_tokens": openai_request.get("max_tokens", 1024),
+        "stream": openai_request.get("stream", False)
     }
+    
     return nvidia_request
 
 def convert_to_openai_format(nvidia_response, model):
     """Convert NVIDIA NIM response to OpenAI format"""
     openai_response = {
-        'id': f"chatcmpl-{nvidia_response.get('id', 'nvidia')}",
-        'object': 'chat.completion',
-        'created': int(datetime.now().timestamp()),
-        'model': model,
-        'choices': [
+        "id": f"chatcmpl-{int(time.time())}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
             {
-                'index': 0,
-                'message': {
-                    'role': 'assistant',
-                    'content': nvidia_response['choices'][0]['message']['content']
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": nvidia_response["choices"][0]["message"]["content"]
                 },
-                'finish_reason': nvidia_response['choices'][0].get('finish_reason', 'stop')
+                "finish_reason": nvidia_response["choices"][0].get("finish_reason", "stop")
             }
         ],
-        'usage': nvidia_response.get('usage', {
-            'prompt_tokens': 0,
-            'completion_tokens': 0,
-            'total_tokens': 0
+        "usage": nvidia_response.get("usage", {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
         })
     }
+    
     return openai_response
 
-def stream_response(nvidia_response, model):
-    """Convert NVIDIA NIM streaming response to OpenAI streaming format"""
-    for line in nvidia_response.iter_lines():
-        if line:
-            line = line.decode('utf-8')
-            if line.startswith('data: '):
-                data = line[6:]
-                if data == '[DONE]':
-                    yield f"data: [DONE]\n\n"
-                    break
-                
-                try:
-                    nvidia_chunk = json.loads(data)
-                    openai_chunk = {
-                        'id': f"chatcmpl-{nvidia_chunk.get('id', 'nvidia')}",
-                        'object': 'chat.completion.chunk',
-                        'created': int(datetime.now().timestamp()),
-                        'model': model,
-                        'choices': [
-                            {
-                                'index': 0,
-                                'delta': nvidia_chunk['choices'][0].get('delta', {}),
-                                'finish_reason': nvidia_chunk['choices'][0].get('finish_reason')
-                            }
-                        ]
-                    }
-                    yield f"data: {json.dumps(openai_chunk)}\n\n"
-                except json.JSONDecodeError:
-                    continue
+def convert_stream_chunk(nvidia_chunk, model):
+    """Convert NVIDIA NIM streaming chunk to OpenAI format"""
+    openai_chunk = {
+        "id": f"chatcmpl-{int(time.time())}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": nvidia_chunk["choices"][0].get("delta", {}),
+                "finish_reason": nvidia_chunk["choices"][0].get("finish_reason")
+            }
+        ]
+    }
+    
+    return openai_chunk
 
 @app.route('/v1/chat/completions', methods=['POST'])
 def chat_completions():
     try:
-        openai_request = request.get_json()
+        openai_request = request.json
         nvidia_request = convert_to_nvidia_format(openai_request)
         
         headers = {
-            'Authorization': f'Bearer {NVIDIA_API_KEY}',
-            'Content-Type': 'application/json'
+            "Authorization": f"Bearer {NVIDIA_API_KEY}",
+            "Content-Type": "application/json"
         }
         
-        is_stream = nvidia_request.get('stream', False)
-        
-        # Make request to NVIDIA NIM
-        response = requests.post(
-            f'{NVIDIA_BASE_URL}/chat/completions',
-            headers=headers,
-            json=nvidia_request,
-            stream=is_stream
-        )
-        
-        if response.status_code != 200:
-            return jsonify({
-                'error': {
-                    'message': f'NVIDIA API error: {response.text}',
-                    'type': 'api_error',
-                    'code': response.status_code
-                }
-            }), response.status_code
-        
-        if is_stream:
-            return Response(
-                stream_response(response, openai_request.get('model', 'gpt-3.5-turbo')),
-                mimetype='text/event-stream'
-            )
-        else:
-            nvidia_response = response.json()
-            openai_response = convert_to_openai_format(
-                nvidia_response, 
-                openai_request.get('model', 'gpt-3.5-turbo')
-            )
-            return jsonify(openai_response)
+        if nvidia_request.get("stream", False):
+            # Handle streaming
+            def generate():
+                response = requests.post(
+                    f"{NVIDIA_BASE_URL}/chat/completions",
+                    headers=headers,
+                    json=nvidia_request,
+                    stream=True
+                )
+                
+                for line in response.iter_lines():
+                    if line:
+                        line = line.decode('utf-8')
+                        if line.startswith('data: '):
+                            data = line[6:]
+                            if data.strip() == '[DONE]':
+                                yield f"data: [DONE]\n\n"
+                            else:
+                                try:
+                                    nvidia_chunk = json.loads(data)
+                                    openai_chunk = convert_stream_chunk(
+                                        nvidia_chunk, 
+                                        openai_request.get("model", "gpt-3.5-turbo")
+                                    )
+                                    yield f"data: {json.dumps(openai_chunk)}\n\n"
+                                except json.JSONDecodeError:
+                                    continue
             
+            return Response(generate(), mimetype='text/event-stream')
+        else:
+            # Handle non-streaming
+            response = requests.post(
+                f"{NVIDIA_BASE_URL}/chat/completions",
+                headers=headers,
+                json=nvidia_request
+            )
+            
+            if response.status_code == 200:
+                nvidia_response = response.json()
+                openai_response = convert_to_openai_format(
+                    nvidia_response, 
+                    openai_request.get("model", "gpt-3.5-turbo")
+                )
+                return jsonify(openai_response)
+            else:
+                return jsonify({"error": response.text}), response.status_code
+                
     except Exception as e:
-        return jsonify({
-            'error': {
-                'message': str(e),
-                'type': 'server_error'
-            }
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/v1/models', methods=['GET'])
 def list_models():
     """List available models in OpenAI format"""
-    models = [
-        {
-            'id': model_name,
-            'object': 'model',
-            'created': int(datetime.now().timestamp()),
-            'owned_by': 'nvidia'
-        }
-        for model_name in MODEL_MAPPING.keys()
-    ]
-    return jsonify({
-        'object': 'list',
-        'data': models
-    })
+    models = {
+        "object": "list",
+        "data": [
+            {
+                "id": "gpt-3.5-turbo",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "nvidia-nim"
+            },
+            {
+                "id": "gpt-4",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "nvidia-nim"
+            },
+            {
+                "id": "deepseek-v3.1",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "nvidia-nim"
+            }
+        ]
+    }
+    return jsonify(models)
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'healthy'})
+    """Health check endpoint"""
+    return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
     print("Starting OpenAI-compatible NVIDIA NIM Proxy...")
-    print(f"Proxy URL: http://localhost:5000")
-    print(f"Chat endpoint: http://localhost:5000/v1/chat/completions")
-    print("\nSet your NVIDIA_API_KEY environment variable before running!")
+    print("Server will run on http://0.0.0.0:5000")
+    print("Set your NVIDIA API key in the NVIDIA_API_KEY variable")
+    print("\nEndpoints:")
+    print("  - POST /v1/chat/completions")
+    print("  - GET  /v1/models")
+    print("  - GET  /health")
     app.run(host='0.0.0.0', port=5000, debug=False)
