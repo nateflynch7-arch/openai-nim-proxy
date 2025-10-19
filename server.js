@@ -6,7 +6,7 @@ import time
 app = Flask(__name__)
 
 # NVIDIA NIM Configuration
-NVIDIA_API_KEY = "your_nvidia_api_key_here"  # Replace with your NVIDIA API key
+NVIDIA_API_KEY = "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"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 # Model mapping (OpenAI model names to NVIDIA NIM models)
