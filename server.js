@@ -1,245 +1,166 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy
-const express = require('express');
-const cors = require('cors');
-const axios = require('axios');
+from flask import Flask, request, jsonify, Response
+import requests
+import json
+import os
+from datetime import datetime
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+app = Flask(__name__)
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+# Configuration
+NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', 'your-nvidia-api-key-here')
+NVIDIA_BASE_URL = os.environ.get('NVIDIA_BASE_URL', 'https://integrate.api.nvidia.com/v1')
 
-// NVIDIA NIM API configuration
-const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
-const NIM_API_KEY = process.env.NIM_API_KEY;
+# Model mapping (OpenAI model names to NVIDIA NIM model names)
+MODEL_MAPPING = {
+    'gpt-3.5-turbo': 'meta/llama-3.1-8b-instruct',
+    'gpt-4': 'meta/llama-3.1-70b-instruct',
+    'gpt-4-turbo': 'meta/llama-3.1-70b-instruct',
+    'gpt-4o': 'meta/llama-3.1-405b-instruct',
+}
 
-// 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
-const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
-
-// 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = false; // Set to true to enable chat_template_kwargs thinking parameter
-
-// Model mapping (adjust based on available NIM models)
-const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
-  'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
-  'gpt-4-turbo': 'moonshotai/kimi-k2-instruct-0905',
-  'gpt-4o': 'deepseek-ai/deepseek-v3.1',
-  'claude-3-opus': 'openai/gpt-oss-120b',
-  'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking' 
-};
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    service: 'OpenAI to NVIDIA NIM Proxy', 
-    reasoning_display: SHOW_REASONING,
-    thinking_mode: ENABLE_THINKING_MODE
-  });
-});
-
-// List models endpoint (OpenAI compatible)
-app.get('/v1/models', (req, res) => {
-  const models = Object.keys(MODEL_MAPPING).map(model => ({
-    id: model,
-    object: 'model',
-    created: Date.now(),
-    owned_by: 'nvidia-nim-proxy'
-  }));
-  
-  res.json({
-    object: 'list',
-    data: models
-  });
-});
-
-// Chat completions endpoint (main proxy)
-app.post('/v1/chat/completions', async (req, res) => {
-  try {
-    const { model, messages, temperature, max_tokens, stream } = req.body;
-    
-    // Smart model selection with fallback
-    let nimModel = MODEL_MAPPING[model];
-    if (!nimModel) {
-      try {
-        await axios.post(`${NIM_API_BASE}/chat/completions`, {
-          model: model,
-          messages: [{ role: 'user', content: 'test' }],
-          max_tokens: 1
-        }, {
-          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
-          validateStatus: (status) => status < 500
-        }).then(res => {
-          if (res.status >= 200 && res.status < 300) {
-            nimModel = model;
-          }
-        });
-      } catch (e) {}
-      
-      if (!nimModel) {
-        const modelLower = model.toLowerCase();
-        if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
-          nimModel = 'meta/llama-3.1-405b-instruct';
-        } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
-          nimModel = 'meta/llama-3.1-70b-instruct';
-        } else {
-          nimModel = 'meta/llama-3.1-8b-instruct';
-        }
-      }
+def convert_to_nvidia_format(openai_request):
+    """Convert OpenAI format to NVIDIA NIM format"""
+    nvidia_request = {
+        'model': MODEL_MAPPING.get(openai_request.get('model', 'gpt-3.5-turbo'), 
+                                   'meta/llama-3.1-8b-instruct'),
+        'messages': openai_request.get('messages', []),
+        'temperature': openai_request.get('temperature', 1.0),
+        'top_p': openai_request.get('top_p', 1.0),
+        'max_tokens': openai_request.get('max_tokens', 1024),
+        'stream': openai_request.get('stream', False)
     }
-    
-    // Transform OpenAI request to NIM format
-    const nimRequest = {
-      model: nimModel,
-      messages: messages,
-      temperature: temperature || 0.6,
-      max_tokens: max_tokens || 9024,
-      extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
-      stream: stream || false
-    };
-    
-    // Make request to NVIDIA NIM API
-    const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
-      headers: {
-        'Authorization': `Bearer ${NIM_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      responseType: stream ? 'stream' : 'json'
-    });
-    
-    if (stream) {
-      // Handle streaming response with reasoning
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      
-      let buffer = '';
-      let reasoningStarted = false;
-      
-      response.data.on('data', (chunk) => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\\n');
-        buffer = lines.pop() || '';
-        
-        lines.forEach(line => {
-          if (line.startsWith('data: ')) {
-            if (line.includes('[DONE]')) {
-              res.write(line + '\\n');
-              return;
+    return nvidia_request
+
+def convert_to_openai_format(nvidia_response, model):
+    """Convert NVIDIA NIM response to OpenAI format"""
+    openai_response = {
+        'id': f"chatcmpl-{nvidia_response.get('id', 'nvidia')}",
+        'object': 'chat.completion',
+        'created': int(datetime.now().timestamp()),
+        'model': model,
+        'choices': [
+            {
+                'index': 0,
+                'message': {
+                    'role': 'assistant',
+                    'content': nvidia_response['choices'][0]['message']['content']
+                },
+                'finish_reason': nvidia_response['choices'][0].get('finish_reason', 'stop')
             }
-            
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.choices?.[0]?.delta) {
-                const reasoning = data.choices[0].delta.reasoning_content;
-                const content = data.choices[0].delta.content;
+        ],
+        'usage': nvidia_response.get('usage', {
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0
+        })
+    }
+    return openai_response
+
+def stream_response(nvidia_response, model):
+    """Convert NVIDIA NIM streaming response to OpenAI streaming format"""
+    for line in nvidia_response.iter_lines():
+        if line:
+            line = line.decode('utf-8')
+            if line.startswith('data: '):
+                data = line[6:]
+                if data == '[DONE]':
+                    yield f"data: [DONE]\n\n"
+                    break
                 
-                if (SHOW_REASONING) {
-                  let combinedContent = '';
-                  
-                  if (reasoning && !reasoningStarted) {
-                    combinedContent = '<think>\\n' + reasoning;
-                    reasoningStarted = true;
-                  } else if (reasoning) {
-                    combinedContent = reasoning;
-                  }
-                  
-                  if (content && reasoningStarted) {
-                    combinedContent += '</think>\\n\\n' + content;
-                    reasoningStarted = false;
-                  } else if (content) {
-                    combinedContent += content;
-                  }
-                  
-                  if (combinedContent) {
-                    data.choices[0].delta.content = combinedContent;
-                    delete data.choices[0].delta.reasoning_content;
-                  }
-                } else {
-                  if (content) {
-                    data.choices[0].delta.content = content;
-                  } else {
-                    data.choices[0].delta.content = '';
-                  }
-                  delete data.choices[0].delta.reasoning_content;
-                }
-              }
-              res.write(`data: ${JSON.stringify(data)}\\n\\n`);
-            } catch (e) {
-              res.write(line + '\\n');
-            }
-          }
-        });
-      });
-      
-      response.data.on('end', () => res.end());
-      response.data.on('error', (err) => {
-        console.error('Stream error:', err);
-        res.end();
-      });
-    } else {
-      // Transform NIM response to OpenAI format with reasoning
-      const openaiResponse = {
-        id: `chatcmpl-${Date.now()}`,
-        object: 'chat.completion',
-        created: Math.floor(Date.now() / 1000),
-        model: model,
-        choices: response.data.choices.map(choice => {
-          let fullContent = choice.message?.content || '';
-          
-          if (SHOW_REASONING && choice.message?.reasoning_content) {
-            fullContent = '<think>\\n' + choice.message.reasoning_content + '\\n</think>\\n\\n' + fullContent;
-          }
-          
-          return {
-            index: choice.index,
-            message: {
-              role: choice.message.role,
-              content: fullContent
-            },
-            finish_reason: choice.finish_reason
-          };
-        }),
-        usage: response.data.usage || {
-          prompt_tokens: 0,
-          completion_tokens: 0,
-          total_tokens: 0
+                try:
+                    nvidia_chunk = json.loads(data)
+                    openai_chunk = {
+                        'id': f"chatcmpl-{nvidia_chunk.get('id', 'nvidia')}",
+                        'object': 'chat.completion.chunk',
+                        'created': int(datetime.now().timestamp()),
+                        'model': model,
+                        'choices': [
+                            {
+                                'index': 0,
+                                'delta': nvidia_chunk['choices'][0].get('delta', {}),
+                                'finish_reason': nvidia_chunk['choices'][0].get('finish_reason')
+                            }
+                        ]
+                    }
+                    yield f"data: {json.dumps(openai_chunk)}\n\n"
+                except json.JSONDecodeError:
+                    continue
+
+@app.route('/v1/chat/completions', methods=['POST'])
+def chat_completions():
+    try:
+        openai_request = request.get_json()
+        nvidia_request = convert_to_nvidia_format(openai_request)
+        
+        headers = {
+            'Authorization': f'Bearer {NVIDIA_API_KEY}',
+            'Content-Type': 'application/json'
         }
-      };
-      
-      res.json(openaiResponse);
-    }
-    
-  } catch (error) {
-    console.error('Proxy error:', error.message);
-    
-    res.status(error.response?.status || 500).json({
-      error: {
-        message: error.message || 'Internal server error',
-        type: 'invalid_request_error',
-        code: error.response?.status || 500
-      }
-    });
-  }
-});
+        
+        is_stream = nvidia_request.get('stream', False)
+        
+        # Make request to NVIDIA NIM
+        response = requests.post(
+            f'{NVIDIA_BASE_URL}/chat/completions',
+            headers=headers,
+            json=nvidia_request,
+            stream=is_stream
+        )
+        
+        if response.status_code != 200:
+            return jsonify({
+                'error': {
+                    'message': f'NVIDIA API error: {response.text}',
+                    'type': 'api_error',
+                    'code': response.status_code
+                }
+            }), response.status_code
+        
+        if is_stream:
+            return Response(
+                stream_response(response, openai_request.get('model', 'gpt-3.5-turbo')),
+                mimetype='text/event-stream'
+            )
+        else:
+            nvidia_response = response.json()
+            openai_response = convert_to_openai_format(
+                nvidia_response, 
+                openai_request.get('model', 'gpt-3.5-turbo')
+            )
+            return jsonify(openai_response)
+            
+    except Exception as e:
+        return jsonify({
+            'error': {
+                'message': str(e),
+                'type': 'server_error'
+            }
+        }), 500
 
-// Catch-all for unsupported endpoints
-app.all('*', (req, res) => {
-  res.status(404).json({
-    error: {
-      message: `Endpoint ${req.path} not found`,
-      type: 'invalid_request_error',
-      code: 404
-    }
-  });
-});
+@app.route('/v1/models', methods=['GET'])
+def list_models():
+    """List available models in OpenAI format"""
+    models = [
+        {
+            'id': model_name,
+            'object': 'model',
+            'created': int(datetime.now().timestamp()),
+            'owned_by': 'nvidia'
+        }
+        for model_name in MODEL_MAPPING.keys()
+    ]
+    return jsonify({
+        'object': 'list',
+        'data': models
+    })
 
-app.listen(PORT, () => {
-  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
-  console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
-});
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'healthy'})
+
+if __name__ == '__main__':
+    print("Starting OpenAI-compatible NVIDIA NIM Proxy...")
+    print(f"Proxy URL: http://localhost:5000")
+    print(f"Chat endpoint: http://localhost:5000/v1/chat/completions")
+    print("\nSet your NVIDIA_API_KEY environment variable before running!")
+    app.run(host='0.0.0.0', port=5000, debug=False)
